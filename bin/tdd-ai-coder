@@ -5,17 +5,40 @@ try {
   // Print Node.js version for debugging
   console.log(`Using Node.js ${process.version}`);
 
-  // Load the main application
-  import('../dist/index.js').catch(err => {
-    console.error('Failed to start TDD-AI Coder:', err);
-    process.exit(1);
-  });
+  // Use import.meta.url approach for ES modules compatibility 
+  // or proper path resolution based on Node.js version
+  if (process.version.startsWith('v18') || process.version.startsWith('v19') ||
+    process.version.startsWith('v20')) {
+    // ES Modules approach
+    import(new URL('../dist/index.js', import.meta.url).pathname).catch(err => {
+      console.error('Failed to start TDD-AI Coder:', err);
+      process.exit(1);
+    });
+  } else {
+    // Fallback for older Node.js versions
+    const path = require('path');
+    const { fileURLToPath } = require('url');
+    const modulePath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../dist/index.js'
+    );
+
+    import(modulePath).catch(err => {
+      console.error('Failed to start TDD-AI Coder:', err);
+      process.exit(1);
+    });
+  }
 } catch (error) {
   console.error('Error starting TDD-AI Coder:', error);
 
   // Check if dist directory exists
   const fs = require('fs');
-  if (!fs.existsSync('./dist')) {
+  if (!fs.existsSync(
+    require('path').resolve(
+      require('path').dirname(require.main.filename),
+      '../dist'
+    )
+  )) {
     console.error('\nError: The "dist" directory does not exist.');
     console.error('Make sure to build the project first:');
     console.error('  npm run build');

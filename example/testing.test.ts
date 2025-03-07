@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import * as test from './testing';
 
 describe('Tests', () => {
-  it('should succeed', () => {
+  it('should succeed', async () => {
     expect(test.hello()).toBe('hello world');
 
     expect(test.hello("nick")).toBe("hello nick");
@@ -25,9 +25,18 @@ describe('Tests', () => {
 
     const user2 = test.createUser("bob", "smith", 10_000);
 
-    user2.pay(user, 500)
+    await user2.pay(user, 500)
 
     expect(user2.getBalance()).toBe(9_500);
+    expect(user.getBalance()).toBe(700);
+
+    const user3 = test.createUser("mack", "attack", 0.50);
+
+    const promise = user3.pay(user, 500)
+
+    expect(promise).rejects.toThrowError("insufficient funds");
+
+    expect(user3.getBalance()).toBe(0.50);
     expect(user.getBalance()).toBe(700);
 
   })

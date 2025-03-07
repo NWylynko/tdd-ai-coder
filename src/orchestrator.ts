@@ -2,10 +2,11 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { runTests, stopTests } from './test-runner.js';
-import { generateImplementation, applyGeneratedCode } from './ai-service.js';
+import { generateImplementation, applyGeneratedCode, initializeAI } from './ai-service.js';
 import { startWatcher, stopWatcher } from './watcher.js';
 import { logger } from './utils/logger.js';
-import { validateTests, isValidationOverridden, setValidationOverride } from './utils/test-validator.js';
+import { validateTests, isValidationOverridden, setValidationOverride, setOpenAIClient } from './utils/test-validator.js';
+import { TddAiConfig } from './utils/config.js';
 import {
   OrchestratorOptions,
   TddAiState,
@@ -17,24 +18,37 @@ import {
 /**
  * Main orchestration logic to run the TDD-AI loop
  * @param options - Orchestrator options
+ * @param config - Application configuration
  * @returns Promise with control handlers
  */
-export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
+export async function startTddAiLoop(
+  options: OrchestratorOptions,
+  config: TddAiConfig
+): Promise<{
   stop: () => Promise<void>;
   getState: () => TddAiState;
 }> {
   const {
     projectPath,
-    testPattern = '**/*.test.{js,ts}',
-    maxAttempts = 10,
     onUpdate = console.log,
-    skipValidation = false,
     onValidationIssue = async () => false, // Default: don't override
   } = options;
+
+  // Use config values instead of defaults
+  const testPattern = config.project.testFilePattern;
+  const maxAttempts = config.project.maxAttempts;
+  const skipValidation = !config.validation.enabled;
+
+  // Initialize the AI service and share it with the test validator
+  logger.info('Initializing AI service...');
+  const aiClient = initializeAI(config);
+  setOpenAIClient(aiClient); // Share the client with test validator
 
   logger.info(`Starting TDD-AI loop for project: ${projectPath}`);
   logger.info(`Test pattern: ${testPattern}`);
   logger.info(`Maximum attempts: ${maxAttempts}`);
+  logger.info(`AI provider: ${config.ai.provider}`);
+  logger.info(`AI model: ${config.ai.model}`);
 
   // State to track progress
   const state: TddAiState = {
@@ -44,12 +58,30 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
     history: [],
   };
 
+  // Track last processed file change to avoid duplicates
+  let lastFileChange = {
+    file: '',
+    timestamp: 0
+  };
+
   // Start file watcher
   logger.info('Starting file watcher...');
   const watcher = await startWatcher({
     projectPath,
     testPattern,
     onChange: async (changedFile: string) => {
+      // Debounce file changes to prevent race conditions
+      const now = Date.now();
+      if (changedFile === lastFileChange.file && now - lastFileChange.timestamp < 1000) {
+        logger.debug(`Ignoring duplicate change notification for ${changedFile} (debounce)`);
+        return;
+      }
+
+      lastFileChange = {
+        file: changedFile,
+        timestamp: now
+      };
+
       logger.info(`File changed: ${changedFile}`);
 
       // Reset state when tests change
@@ -195,7 +227,7 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
           });
 
           try {
-            const validationResult = await validateTests(testFilePath, testCode, fileResult);
+            const validationResult = await validateTests(testFilePath, testCode, fileResult, config);
 
             // If issues found, notify the user
             if (validationResult.issues.length > 0) {
@@ -296,7 +328,7 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
           implementationPath,
           currentImplementation,
           previousAttempts: previousAttemptsForFile
-        });
+        }, config);
 
         if (!generated.success) {
           logger.error('Error generating implementation:', generated.error);

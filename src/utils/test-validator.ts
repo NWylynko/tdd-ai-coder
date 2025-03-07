@@ -2,16 +2,10 @@
 import { TestFileResult } from '../types.js';
 import { logger } from './logger.js';
 import { OpenAI } from 'openai';
+import { TddAiConfig } from './config.js';
 
-// Initialize OpenAI client (shared with the ai-service)
-let openai: OpenAI;
-try {
-  openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
-} catch (error) {
-  logger.error('Failed to initialize OpenAI client for test validation:', error);
-}
+// OpenAI client instance (to be initialized)
+let openai: OpenAI | null = null;
 
 export interface TestValidationResult {
   isValid: boolean;
@@ -27,16 +21,27 @@ export interface TestIssue {
 }
 
 /**
+ * Share the OpenAI instance from AI service
+ * @param aiClient The OpenAI client instance
+ */
+export function setOpenAIClient(aiClient: OpenAI): void {
+  openai = aiClient;
+  logger.debug('OpenAI client shared with test validator');
+}
+
+/**
  * Validates a test file for logical inconsistencies and common mistakes
  * @param testFilePath - Path to the test file
  * @param testCode - Content of the test file
  * @param testResults - Test results if available
+ * @param config - Application configuration
  * @returns Validation results with any issues found
  */
 export async function validateTests(
   testFilePath: string,
   testCode: string,
-  testResults?: TestFileResult
+  testResults?: TestFileResult,
+  config?: TddAiConfig
 ): Promise<TestValidationResult> {
   logger.info(`Validating test file: ${testFilePath}`);
 
@@ -47,9 +52,18 @@ export async function validateTests(
     logger.warn(`Found ${staticIssues.length} potential issues with static analysis`);
   }
 
-  // Then, use the LLM for deeper analysis
+  // Then, use the LLM for deeper analysis if available
   try {
-    const llmAnalysis = await performLLMAnalysis(testCode, testResults);
+    if (!openai) {
+      logger.warn('OpenAI client not initialized for test validation, using static analysis only');
+      return {
+        isValid: staticIssues.every(issue => issue.severity !== 'error'),
+        issues: staticIssues,
+        overallAssessment: 'Basic validation performed. LLM validation unavailable.'
+      };
+    }
+
+    const llmAnalysis = await performLLMAnalysis(testCode, testResults, config);
 
     // Combine the results
     const allIssues = [...staticIssues, ...llmAnalysis.issues];
@@ -71,7 +85,7 @@ export async function validateTests(
     return {
       isValid: staticIssues.every(issue => issue.severity !== 'error'),
       issues: staticIssues,
-      overallAssessment: 'Test validation could not be completed due to an error.'
+      overallAssessment: 'Test validation could not be completed due to an error. Basic issues check performed.'
     };
   }
 }
@@ -130,11 +144,12 @@ function performStaticAnalysis(testCode: string): TestIssue[] {
  */
 async function performLLMAnalysis(
   testCode: string,
-  testResults?: TestFileResult
+  testResults?: TestFileResult,
+  config?: TddAiConfig
 ): Promise<{ issues: TestIssue[], overallAssessment: string }> {
   if (!openai) {
-    logger.error('OpenAI client not initialized, skipping LLM test analysis');
-    return { issues: [], overallAssessment: 'LLM analysis unavailable.' };
+    logger.warn('OpenAI client not initialized, skipping LLM test analysis');
+    return { issues: [], overallAssessment: 'LLM analysis unavailable. Make sure the OpenAI client is properly initialized.' };
   }
 
   logger.info('Performing LLM analysis of test code...');
@@ -144,7 +159,7 @@ async function performLLMAnalysis(
 
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4-turbo",
+      model: config?.ai.model || 'gpt-4-turbo',
       messages: [
         {
           role: "system",
@@ -158,7 +173,7 @@ async function performLLMAnalysis(
           content: prompt
         }
       ],
-      temperature: 0.3,
+      temperature: config?.ai.temperature || 0.3,
       response_format: { type: "json_object" }
     });
 
@@ -187,7 +202,7 @@ async function performLLMAnalysis(
       logger.error('Error parsing LLM analysis response:', parseError);
       return {
         issues: [],
-        overallAssessment: 'Error parsing analysis results.'
+        overallAssessment: 'Error parsing analysis results. The AI returned malformed JSON.'
       };
     }
   } catch (error) {

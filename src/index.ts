@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // src/index.ts
-import "source-map-support/register.js";
+
+// These imports should come first to ensure proper setup
+import 'source-map-support/register.js';
 import 'dotenv/config';
+
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -11,6 +14,7 @@ import { startTddAiLoop } from './orchestrator.js';
 import { startUiServer } from './ui/server.js';
 import { UiServer, StatusUpdate, TddAiState, TestValidationStatus } from './types.js';
 import { logger } from './utils/logger.js';
+import { loadConfig, createSampleConfig } from './utils/config.js';
 
 const program = new Command();
 
@@ -31,10 +35,12 @@ program
   .option('-v, --verbose', 'Enable verbose logging (includes all AI prompts and responses)', false)
   .option('--skip-validation', 'Skip test validation step', false)
   .option('--log-level <level>', 'Set log level (debug, info, warn, error)', 'info')
+  .option('--ai-model <model>', 'AI model to use', 'gpt-4-turbo')
+  .option('--ai-provider <provider>', 'AI provider to use (openai, anthropic, local)', 'openai')
+  .option('--ai-temperature <temp>', 'Temperature for AI generation (0-1)', '0.2')
   .action(async (options) => {
     // Process options
     const projectPath = path.resolve(options.project);
-    const maxAttempts = parseInt(options.maxAttempts, 10);
     const uiPort = parseInt(options.uiPort, 10);
 
     // Configure logging
@@ -54,23 +60,19 @@ program
 
     logger.info('TDD-AI-Coder starting up...');
 
-    // Check OpenAI API key
-    if (!process.env.OPENAI_API_KEY) {
-      console.error(chalk.red('Error: OPENAI_API_KEY not found in environment variables'));
-      console.log('Please set your API key:');
-      console.log('  export OPENAI_API_KEY=your_api_key_here');
-      console.log('  or create a .env file with OPENAI_API_KEY=your_api_key_here');
-      process.exit(1);
-    }
+    // Load configuration
+    const config = await loadConfig(options);
 
     let spinner = ora('Starting TDD-AI Coder...').start();
 
     // Display configuration info
     console.log(chalk.blue('🧪 TDD-AI Coder'));
     console.log(chalk.gray(`Project path: ${projectPath}`));
-    console.log(chalk.gray(`Test pattern: ${options.testPattern}`));
-    console.log(chalk.gray(`Max attempts: ${maxAttempts}`));
-    console.log(chalk.gray(`Log level: ${logLevel}`));
+    console.log(chalk.gray(`Test pattern: ${config.project.testFilePattern}`));
+    console.log(chalk.gray(`Max attempts: ${config.project.maxAttempts}`));
+    console.log(chalk.gray(`Log level: ${config.logging.level}`));
+    console.log(chalk.gray(`AI provider: ${config.ai.provider}`));
+    console.log(chalk.gray(`AI model: ${config.ai.model}`));
 
     // Start UI if requested
     let uiServer: UiServer | undefined;
@@ -140,12 +142,9 @@ program
     try {
       tddAi = await startTddAiLoop({
         projectPath,
-        testPattern: options.testPattern,
-        maxAttempts,
-        skipValidation: options.skipValidation,
         onValidationIssue: validationPrompt,
         onUpdate: handleStatusUpdate,
-      });
+      }, config);
     } catch (error) {
       spinner.fail(`Failed to start TDD-AI loop: ${error instanceof Error ? error.message : String(error)}`);
       if (uiServer) {
@@ -173,6 +172,24 @@ program
 
       process.exit(0);
     });
+  });
+
+// Add a command to initialize config - MOVED BEFORE parse()
+program
+  .command('init')
+  .description('Initialize a configuration file')
+  .option('-d, --directory <path>', 'Directory to create the config file in', '.')
+  .action(async (options) => {
+    console.log(chalk.blue('🔧 Initializing TDD-AI Coder configuration'));
+    const directory = path.resolve(options.directory);
+
+    try {
+      createSampleConfig(directory);
+      console.log(chalk.green(`Configuration file created successfully in ${directory}`));
+      console.log(chalk.gray('You can now edit this file to customize the behavior of TDD-AI Coder.'));
+    } catch (error) {
+      console.error(chalk.red(`Error creating configuration file: ${error instanceof Error ? error.message : String(error)}`));
+    }
   });
 
 // Add a diagnostics command to help debug issues
@@ -203,6 +220,7 @@ program
     console.log('Environment looks good! Run "tdd-ai-coder start" to begin.');
   });
 
+// Parse arguments AFTER all commands are registered
 program.parse(process.argv);
 
 /**

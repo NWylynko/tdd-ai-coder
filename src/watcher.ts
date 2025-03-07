@@ -6,12 +6,36 @@ import { WatcherOptions } from './types.js';
 import { logger } from './utils/logger.js';
 
 /**
+ * Debounce function to prevent multiple calls in quick succession
+ */
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): (...args: Parameters<T>) => void {
+  let timeout: NodeJS.Timeout | null = null;
+  return function (...args: Parameters<T>): void {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    timeout = setTimeout(() => {
+      func(...args);
+      timeout = null;
+    }, wait);
+  };
+}
+
+/**
  * Starts a file watcher to detect changes in test and implementation files
  * @param options - Watcher configuration
  * @returns Promise with the watcher instance
  */
 export async function startWatcher(options: WatcherOptions): Promise<chokidar.FSWatcher> {
   const { projectPath, testPattern, onChange } = options;
+
+  // Debounce the onChange handler to prevent rapid successive events
+  const debouncedOnChange = debounce((changedFile: string) => {
+    onChange(changedFile);
+  }, 300);
 
   logger.info(`Starting file watcher for ${projectPath} with pattern: ${testPattern}`);
 
@@ -54,24 +78,37 @@ export async function startWatcher(options: WatcherOptions): Promise<chokidar.FS
       persistent: true,
       ignoreInitial: true,
       awaitWriteFinish: {
-        stabilityThreshold: 300,  // Wait for file size to remain stable for 300ms
+        stabilityThreshold: 500,  // Increased from 300ms for better stability
         pollInterval: 100         // Poll every 100ms
       },
       atomic: true,               // Handle atomic writes properly 
       disableGlobbing: false,     // We're passing actual file paths, not globs
     });
 
+    // Track file change timestamps to further prevent rapid duplicate events
+    const fileChangeTimestamps = new Map<string, number>();
+
     // Set up event handlers
     watcher.on('change', (changedFile) => {
+      const now = Date.now();
+      const lastChange = fileChangeTimestamps.get(changedFile) || 0;
+
+      // Ignore if the file was just changed (within 500ms)
+      if (now - lastChange < 500) {
+        logger.debug(`Ignoring rapid change event for ${changedFile}`);
+        return;
+      }
+
+      fileChangeTimestamps.set(changedFile, now);
       const relativePath = path.relative(projectPath, changedFile);
       logger.info(`File changed: ${relativePath}`);
-      onChange(changedFile);
+      debouncedOnChange(changedFile);
     });
 
     watcher.on('add', (addedFile) => {
       const relativePath = path.relative(projectPath, addedFile);
       logger.info(`File added: ${relativePath}`);
-      onChange(addedFile);
+      debouncedOnChange(addedFile);
     });
 
     watcher.on('unlink', (removedFile) => {

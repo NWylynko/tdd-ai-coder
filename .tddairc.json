@@ -1,0 +1,26 @@
+{
+  "ai": {
+    "provider": "openai",
+    "model": "gpt-3.5-turbo",
+    "temperature": 0.2,
+    "timeout": 60000
+  },
+  "validation": {
+    "enabled": true,
+    "validateOnFirstRunOnly": true,
+    "severityThreshold": "error"
+  },
+  "project": {
+    "testFilePattern": "**/*.test.{js,ts}",
+    "maxAttempts": 10,
+    "implExtension": ".ts",
+    "waitBetweenAttempts": 2000
+  },
+  "logging": {
+    "level": "info",
+    "timestamps": true,
+    "colors": true,
+    "saveHistory": true,
+    "historyPath": ".tdd-ai-history"
+  }
+}

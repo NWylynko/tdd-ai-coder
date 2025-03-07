@@ -4,26 +4,52 @@ import fs from 'fs/promises';
 import path from 'path';
 import { GenerateOptions, GenerateResult, ApplyCodeOptions } from './types.js';
 import { logger } from './utils/logger.js';
+import { TddAiConfig } from './utils/config.js';
 
-// Initialize OpenAI client
+// OpenAI client instance
 let openai: OpenAI;
 
-try {
-  openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
-  logger.debug('OpenAI client initialized');
-} catch (error) {
-  logger.error('Failed to initialize OpenAI client:', error);
-  throw new Error(`OpenAI initialization error: ${error instanceof Error ? error.message : String(error)}`);
+/**
+ * Initialize the AI client based on configuration
+ * @param config The application configuration
+ * @returns The initialized AI client
+ */
+export function initializeAI(config: TddAiConfig): OpenAI {
+  try {
+    if (config.ai.provider === 'openai') {
+      openai = new OpenAI({
+        apiKey: config.ai.apiKey,
+        baseURL: config.ai.apiEndpoint,
+        timeout: config.ai.timeout,
+      });
+      logger.debug('OpenAI client initialized');
+      return openai;
+    } else if (config.ai.provider === 'anthropic') {
+      // Would add Anthropic client initialization here
+      // For now, just throw an error
+      throw new Error('Anthropic support not yet implemented');
+    } else if (config.ai.provider === 'local') {
+      // Would add local LLM initialization here
+      throw new Error('Local LLM support not yet implemented');
+    } else {
+      throw new Error(`Unknown AI provider: ${config.ai.provider}`);
+    }
+  } catch (error) {
+    logger.error('Failed to initialize AI client:', error);
+    throw new Error(`AI initialization error: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**
  * Generate code to make failing tests pass
  * @param options - Generation options
+ * @param config - Application configuration
  * @returns Promise with generated code and explanation
  */
-export async function generateImplementation(options: GenerateOptions): Promise<GenerateResult> {
+export async function generateImplementation(
+  options: GenerateOptions,
+  config: TddAiConfig
+): Promise<GenerateResult> {
   const {
     testResults,
     testCode,
@@ -104,14 +130,16 @@ export async function generateImplementation(options: GenerateOptions): Promise<
       };
     }
 
-    // Set timeout for API call
-    const timeout = setTimeout(() => {
-      logger.warn('OpenAI API call is taking longer than expected...');
-    }, 10000);
+    // Set up controller for request timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      logger.warn('OpenAI API call is taking too long, aborting...');
+      controller.abort();
+    }, config.ai.timeout || 60000);
 
     try {
       const response = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo", // Use appropriate model
+        model: config.ai.model || "gpt-4-turbo",
         messages: [
           {
             role: "system",
@@ -122,10 +150,10 @@ export async function generateImplementation(options: GenerateOptions): Promise<
             content: prompt
           }
         ],
-        temperature: 0.2, // Lower temperature for more deterministic output
-      });
+        temperature: config.ai.temperature || 0.2,
+      }, { signal: controller.signal });
 
-      clearTimeout(timeout);
+      clearTimeout(timeoutId);
 
       logger.info('Received response from OpenAI');
 
@@ -159,10 +187,18 @@ export async function generateImplementation(options: GenerateOptions): Promise<
         reasoning: response.choices[0].message.content || '',
       };
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timeoutId);
     }
   } catch (error) {
     logger.error('Error generating implementation with OpenAI:', error);
+
+    // Handle abort error separately
+    if (error instanceof Error && error.name === 'AbortError') {
+      return {
+        success: false,
+        error: 'OpenAI API request timed out. Try increasing the timeout value in your configuration.'
+      };
+    }
 
     // Handle common API errors
     if (error instanceof Error) {
@@ -244,7 +280,7 @@ ${currentImplementation}
 \`\`\`
 ` : ''}`;
 
-  // Add previous attempts if available
+  // Add previous attempts if available, with safe processing to avoid circular references
   if (previousAttempts && previousAttempts.length > 0) {
     promptText += `\n\n## Previous Attempts:`;
 
@@ -252,29 +288,31 @@ ${currentImplementation}
     promptText += `\n\n### Analysis of Previous Attempts:`;
     promptText += `\nYou've made ${previousAttempts.length} previous attempts to solve this problem.`;
 
-    // Find the attempt with the most passing tests
-    const bestAttempt = [...previousAttempts].sort((a, b) =>
-      (b.testResults?.passingTests || 0) - (a.testResults?.passingTests || 0)
-    )[0];
+    // Find the attempt with the most passing tests (safely)
+    let bestAttemptIndex = 0;
+    let mostPassingTests = 0;
 
-    if (bestAttempt) {
-      promptText += `\nYour best attempt was #${bestAttempt.attempt} with ${bestAttempt.testResults?.passingTests || 0} passing tests.`;
+    for (let i = 0; i < previousAttempts.length; i++) {
+      const passingTests = previousAttempts[i]?.testResults?.passingTests || 0;
+      if (passingTests > mostPassingTests) {
+        mostPassingTests = passingTests;
+        bestAttemptIndex = i;
+      }
     }
 
-    // Add pattern of errors if consistent across attempts
+    if (previousAttempts[bestAttemptIndex]) {
+      promptText += `\nYour best attempt was #${previousAttempts[bestAttemptIndex].attempt} with ${mostPassingTests} passing tests.`;
+    }
+
+    // Add pattern of errors if consistent across attempts - with safe handling
     const commonErrors = new Map<string, number>();
-    previousAttempts.forEach((attempt: {
-      attempt: number;
-      implementation: string;
-      testResults?: {
-        passingTests: number;
-        failingTests: number;
-        failureDetails?: Array<{ name: string; error: string; }>
-      }
-    }) => {
-      attempt.testResults?.failureDetails?.forEach((failure: { name: string; error: string }) => {
-        const key = `${failure.name}: ${failure.error}`;
-        commonErrors.set(key, (commonErrors.get(key) || 0) + 1);
+    previousAttempts.forEach(attempt => {
+      const failureDetails = attempt?.testResults?.failureDetails || [];
+      failureDetails.forEach(failure => {
+        if (failure && typeof failure === 'object' && 'name' in failure && 'error' in failure) {
+          const key = `${failure.name}: ${failure.error}`;
+          commonErrors.set(key, (commonErrors.get(key) || 0) + 1);
+        }
       });
     });
 
@@ -289,10 +327,17 @@ ${currentImplementation}
       });
     }
 
-    // Now add the detailed attempt history
+    // Now add the detailed attempt history (safely processed)
     for (const attempt of previousAttempts) {
+      if (!attempt) continue;
+
       promptText += `\n\n### Attempt ${attempt.attempt}:`;
-      promptText += `\n\`\`\`${isTypescript ? 'typescript' : 'javascript'}\n${attempt.implementation}\n\`\`\``;
+
+      if (attempt.implementation) {
+        promptText += `\n\`\`\`${isTypescript ? 'typescript' : 'javascript'}\n${attempt.implementation}\n\`\`\``;
+      } else {
+        promptText += `\n(No implementation code available for this attempt)`;
+      }
 
       if (attempt.testResults) {
         promptText += `\n\nResults: ${attempt.testResults.passingTests} passing, ${attempt.testResults.failingTests} failing`;
@@ -300,7 +345,9 @@ ${currentImplementation}
         if (attempt.testResults.failureDetails && attempt.testResults.failureDetails.length > 0) {
           promptText += `\n\nFailures:`;
           for (const failure of attempt.testResults.failureDetails) {
-            promptText += `\n- ${failure.name}: ${failure.error}`;
+            if (failure && typeof failure === 'object' && 'name' in failure && 'error' in failure) {
+              promptText += `\n- ${failure.name}: ${failure.error}`;
+            }
           }
         }
       }
@@ -350,6 +397,7 @@ function removeMarkdownFormatting(code: string): string {
   logger.debug('No Markdown formatting detected');
   return code;
 }
+
 export async function applyGeneratedCode(options: ApplyCodeOptions): Promise<boolean> {
   const { code, implementationPath } = options;
 

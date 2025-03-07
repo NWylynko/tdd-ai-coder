@@ -48,10 +48,12 @@ export class User {
         return this.balance;
     }
 
-    pay(otherUser: User, amount: number) {
+    async pay(otherUser: User, amount: number): Promise<void> {
         if (this.balance >= amount) {
             this.balance -= amount;
             otherUser.addBalance(amount);
+        } else {
+            throw new Error("insufficient funds");
         }
     }
 }
