@@ -49,6 +49,18 @@ export interface GenerateOptions {
   testCode: string;
   implementationPath: string;
   currentImplementation?: string;
+  previousAttempts?: Array<{
+    attempt: number;
+    implementation: string;
+    testResults?: {
+      passingTests: number;
+      failingTests: number;
+      failureDetails?: Array<{
+        name: string;
+        error: string;
+      }>;
+    };
+  }>;
 }
 
 export interface GenerateResult {
@@ -97,6 +109,15 @@ export interface ImplementationAttempt {
   fileUpdated?: string;
   success?: boolean;
   error?: string;
+  testResults?: {
+    totalTests: number;
+    passingTests: number;
+    failingTests: number;
+    failureDetails?: Array<{
+      name: string;
+      error: string;
+    }>;
+  };
 }
 
 export type StatusUpdateType =

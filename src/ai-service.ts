@@ -29,6 +29,7 @@ export async function generateImplementation(options: GenerateOptions): Promise<
     testCode,
     implementationPath,
     currentImplementation = '',
+    previousAttempts = []
   } = options;
 
   logger.info(`Generating implementation for ${implementationPath}`);
@@ -66,6 +67,10 @@ export async function generateImplementation(options: GenerateOptions): Promise<
 
   logger.info(`Found ${failingTests.length} failing tests`);
 
+  if (previousAttempts && previousAttempts.length > 0) {
+    logger.info(`Including ${previousAttempts.length} previous attempts in the context`);
+  }
+
   // Format the test failures for better AI context
   const formattedFailures = failingTests.map(test => ({
     name: test.name,
@@ -81,6 +86,7 @@ export async function generateImplementation(options: GenerateOptions): Promise<
     failingTests: formattedFailures,
     currentImplementation,
     implementationPath,
+    previousAttempts
   });
 
   logger.debug(`Generated prompt (${prompt.length} characters)`);
@@ -189,7 +195,8 @@ function buildPrompt({
   testCode,
   failingTests,
   currentImplementation,
-  implementationPath
+  implementationPath,
+  previousAttempts = []
 }: {
   testCode: string;
   failingTests: Array<{
@@ -199,11 +206,23 @@ function buildPrompt({
   }>;
   currentImplementation: string;
   implementationPath: string;
+  previousAttempts?: Array<{
+    attempt: number;
+    implementation: string;
+    testResults?: {
+      passingTests: number;
+      failingTests: number;
+      failureDetails?: Array<{
+        name: string;
+        error: string;
+      }>;
+    };
+  }>;
 }): string {
   const fileExtension = path.extname(implementationPath);
   const isTypescript = fileExtension === '.ts' || fileExtension === '.tsx';
 
-  return `
+  let promptText = `
 I need to implement code that passes these failing tests:
 
 ## Test File:
@@ -223,11 +242,76 @@ ${currentImplementation ? `
 \`\`\`${isTypescript ? 'typescript' : 'javascript'}
 ${currentImplementation}
 \`\`\`
-` : ''}
+` : ''}`;
 
-Please generate the implementation code for ${implementationPath} that will make all these tests pass. 
-Only return valid code for the implementation file, no explanations or markdown.
-`;
+  // Add previous attempts if available
+  if (previousAttempts && previousAttempts.length > 0) {
+    promptText += `\n\n## Previous Attempts:`;
+
+    // Add a summary analysis section
+    promptText += `\n\n### Analysis of Previous Attempts:`;
+    promptText += `\nYou've made ${previousAttempts.length} previous attempts to solve this problem.`;
+
+    // Find the attempt with the most passing tests
+    const bestAttempt = [...previousAttempts].sort((a, b) =>
+      (b.testResults?.passingTests || 0) - (a.testResults?.passingTests || 0)
+    )[0];
+
+    if (bestAttempt) {
+      promptText += `\nYour best attempt was #${bestAttempt.attempt} with ${bestAttempt.testResults?.passingTests || 0} passing tests.`;
+    }
+
+    // Add pattern of errors if consistent across attempts
+    const commonErrors = new Map<string, number>();
+    previousAttempts.forEach((attempt: {
+      attempt: number;
+      implementation: string;
+      testResults?: {
+        passingTests: number;
+        failingTests: number;
+        failureDetails?: Array<{ name: string; error: string; }>
+      }
+    }) => {
+      attempt.testResults?.failureDetails?.forEach((failure: { name: string; error: string }) => {
+        const key = `${failure.name}: ${failure.error}`;
+        commonErrors.set(key, (commonErrors.get(key) || 0) + 1);
+      });
+    });
+
+    const persistentErrors = Array.from(commonErrors.entries())
+      .filter(([_, count]) => count >= Math.ceil(previousAttempts.length / 2))
+      .map(([error, _]) => error);
+
+    if (persistentErrors.length > 0) {
+      promptText += `\n\nPersistent errors that have appeared in multiple attempts:`;
+      persistentErrors.forEach(error => {
+        promptText += `\n- ${error}`;
+      });
+    }
+
+    // Now add the detailed attempt history
+    for (const attempt of previousAttempts) {
+      promptText += `\n\n### Attempt ${attempt.attempt}:`;
+      promptText += `\n\`\`\`${isTypescript ? 'typescript' : 'javascript'}\n${attempt.implementation}\n\`\`\``;
+
+      if (attempt.testResults) {
+        promptText += `\n\nResults: ${attempt.testResults.passingTests} passing, ${attempt.testResults.failingTests} failing`;
+
+        if (attempt.testResults.failureDetails && attempt.testResults.failureDetails.length > 0) {
+          promptText += `\n\nFailures:`;
+          for (const failure of attempt.testResults.failureDetails) {
+            promptText += `\n- ${failure.name}: ${failure.error}`;
+          }
+        }
+      }
+    }
+  }
+
+  promptText += `\n\nPlease generate the implementation code for ${implementationPath} that will make all these tests pass. 
+Remember to learn from the previous attempts and their results.
+Only return valid code for the implementation file, no explanations or markdown.`;
+
+  return promptText;
 }
 
 /**

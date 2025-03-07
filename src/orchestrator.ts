@@ -85,10 +85,27 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
         logger.error(`Test run error: ${testResults.error}`);
       }
 
+      // Create attempt record early to track all information
+      const currentAttempt: ImplementationAttempt = {
+        timestamp: new Date(),
+        attempt: state.attempts,
+        implementation: '', // Will be filled later
+        testResults: {
+          totalTests: testResults.results?.summary.total || 0,
+          passingTests: testResults.results?.summary.passed || 0,
+          failingTests: testResults.results?.summary.failed || 0,
+        }
+      };
+
       // All tests passing?
       if (testResults.success) {
         logger.info('🎉 All tests are passing!');
         state.allTestsPassing = true;
+
+        // Update the current attempt with success status
+        currentAttempt.success = true;
+        state.history.push(currentAttempt);
+
         onUpdate({
           status: 'success',
           message: `All tests passing after ${state.attempts} attempts!`,
@@ -115,6 +132,29 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
       );
 
       logger.info(`Found ${filesWithFailingTests.length} files with failing tests out of ${testResults.results.files.length} total`);
+
+      // Collect failure details for the attempt record
+      if (!currentAttempt.testResults) {
+        currentAttempt.testResults = {
+          totalTests: 0,
+          passingTests: 0,
+          failingTests: 0,
+          failureDetails: []
+        };
+      } else if (!currentAttempt.testResults.failureDetails) {
+        currentAttempt.testResults.failureDetails = [];
+      }
+
+      filesWithFailingTests.forEach(file => {
+        file.tests.forEach(test => {
+          if (!test.success) {
+            currentAttempt.testResults!.failureDetails!.push({
+              name: test.name,
+              error: test.error || 'Unknown error'
+            });
+          }
+        });
+      });
 
       // Process the failing files (or all files with failing tests)
       for (const fileResult of filesWithFailingTests.length > 0 ? filesWithFailingTests : testResults.results.files) {
@@ -166,11 +206,26 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
 
         // 3. Generate implementation
         logger.info('Generating implementation code...');
+
+        // Get previous attempts for this file to give the AI more context
+        const previousAttemptsForFile = state.history
+          .filter(attempt => attempt.fileUpdated === implementationPath)
+          .map(attempt => ({
+            attempt: attempt.attempt,
+            implementation: attempt.implementation,
+            testResults: attempt.testResults
+          }));
+
+        if (previousAttemptsForFile.length > 0) {
+          logger.info(`Found ${previousAttemptsForFile.length} previous attempts for this file`);
+        }
+
         const generated = await generateImplementation({
           testResults: fileResult,
           testCode,
           implementationPath,
           currentImplementation,
+          previousAttempts: previousAttemptsForFile
         });
 
         if (!generated.success) {
@@ -212,12 +267,13 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
 
         logger.info('Implementation applied successfully');
 
+        // Update the current attempt with the implementation details
+        currentAttempt.implementation = generated.code;
+        currentAttempt.fileUpdated = implementationPath;
+        currentAttempt.success = false; // We'll know on next run if it was successful
+
         // Add to history
-        state.history.push({
-          timestamp: new Date(),
-          attempt: state.attempts,
-          implementation: generated.code,
-        });
+        state.history.push(currentAttempt);
 
         onUpdate({
           status: 'implementation_updated',
