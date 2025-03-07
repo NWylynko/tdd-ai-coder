@@ -1,0 +1,25 @@
+#!/usr/bin/env node
+
+// Check if environment is properly set up
+try {
+  // Print Node.js version for debugging
+  console.log(`Using Node.js ${process.version}`);
+
+  // Load the main application
+  import('../dist/index.js').catch(err => {
+    console.error('Failed to start TDD-AI Coder:', err);
+    process.exit(1);
+  });
+} catch (error) {
+  console.error('Error starting TDD-AI Coder:', error);
+
+  // Check if dist directory exists
+  const fs = require('fs');
+  if (!fs.existsSync('./dist')) {
+    console.error('\nError: The "dist" directory does not exist.');
+    console.error('Make sure to build the project first:');
+    console.error('  npm run build');
+  }
+
+  process.exit(1);
+}
