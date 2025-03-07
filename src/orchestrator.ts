@@ -5,11 +5,13 @@ import { runTests, stopTests } from './test-runner.js';
 import { generateImplementation, applyGeneratedCode } from './ai-service.js';
 import { startWatcher, stopWatcher } from './watcher.js';
 import { logger } from './utils/logger.js';
+import { validateTests, isValidationOverridden, setValidationOverride } from './utils/test-validator.js';
 import {
   OrchestratorOptions,
   TddAiState,
   StatusUpdate,
-  ImplementationAttempt
+  ImplementationAttempt,
+  TestValidationStatus
 } from './types.js';
 
 /**
@@ -26,6 +28,8 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
     testPattern = '**/*.test.{js,ts}',
     maxAttempts = 10,
     onUpdate = console.log,
+    skipValidation = false,
+    onValidationIssue = async () => false, // Default: don't override
   } = options;
 
   logger.info(`Starting TDD-AI loop for project: ${projectPath}`);
@@ -179,6 +183,72 @@ export async function startTddAiLoop(options: OrchestratorOptions): Promise<{
             message: `Error reading test file: ${err instanceof Error ? err.message : String(err)}`,
           });
           continue;
+        }
+
+        // Validate test files if not skipped
+        if (!skipValidation && !isValidationOverridden(testFilePath)) {
+          logger.info('Validating test file for logical issues...');
+          onUpdate({
+            status: 'validation_waiting',
+            file: testFilePath,
+            attempt: state.attempts,
+          });
+
+          try {
+            const validationResult = await validateTests(testFilePath, testCode, fileResult);
+
+            // If issues found, notify the user
+            if (validationResult.issues.length > 0) {
+              logger.warn(`Found ${validationResult.issues.length} potential issues with the test file`);
+              logger.info(`Overall assessment: ${validationResult.overallAssessment}`);
+
+              // Create validation status object
+              const validationStatus: TestValidationStatus = {
+                ...validationResult,
+                overridden: false
+              };
+
+              // Notify user and wait for decision
+              onUpdate({
+                status: 'validation_warning',
+                file: testFilePath,
+                attempt: state.attempts,
+                validationIssues: validationResult.issues,
+                validationAssessment: validationResult.overallAssessment
+              });
+
+              // If there are error-level issues, ask for override
+              const hasErrors = validationResult.issues.some(issue => issue.severity === 'error');
+              if (hasErrors) {
+                logger.warn('Test file has potential logical errors that may prevent successful implementation');
+
+                // Ask the user if they want to proceed
+                const shouldOverride = await onValidationIssue(validationStatus, testFilePath);
+
+                if (shouldOverride) {
+                  logger.info('User chose to override validation warnings and proceed');
+                  setValidationOverride(testFilePath);
+                } else {
+                  logger.info('User chose to stop and fix the test file issues');
+                  onUpdate({
+                    status: 'error',
+                    message: 'Test validation failed. Fix the issues in the test file and try again.',
+                    file: testFilePath
+                  });
+                  continue;
+                }
+              } else {
+                // Just warnings, log them but proceed
+                logger.info('Proceeding despite validation warnings (no critical errors found)');
+              }
+            } else {
+              logger.info('Test validation passed, no issues found');
+            }
+          } catch (err) {
+            logger.error('Error during test validation:', err);
+            // Proceed despite validation error
+            logger.info('Proceeding despite validation error');
+          }
         }
 
         // Determine implementation file path

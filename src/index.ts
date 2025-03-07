@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // src/index.ts
-import 'source-map-support/register.js';
+import "source-map-support/register.js";
 import 'dotenv/config';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
 import path from 'path';
+import readline from 'readline';
 import { startTddAiLoop } from './orchestrator.js';
 import { startUiServer } from './ui/server.js';
-import { UiServer, StatusUpdate, TddAiState } from './types.js';
+import { UiServer, StatusUpdate, TddAiState, TestValidationStatus } from './types.js';
 import { logger } from './utils/logger.js';
 
 const program = new Command();
@@ -28,6 +29,7 @@ program
   .option('--ui-port <port>', 'Port for the web UI', '3000')
   .option('-d, --debug', 'Enable debug logging', false)
   .option('-v, --verbose', 'Enable verbose logging (includes all AI prompts and responses)', false)
+  .option('--skip-validation', 'Skip test validation step', false)
   .option('--log-level <level>', 'Set log level (debug, info, warn, error)', 'info')
   .action(async (options) => {
     // Process options
@@ -101,6 +103,14 @@ program
           spinner.succeed(`Updated ${path.basename(update.file || '')} (attempt ${update.attempt})`);
           spinner = ora('Waiting for next step...').start();
           break;
+        case 'validation_waiting':
+          spinner.text = `Validating test file ${path.basename(update.file || '')}...`;
+          break;
+        case 'validation_warning':
+          // Validation warnings are handled by the validation prompt
+          // No spinner updates needed as the prompt will take over
+          spinner.stop();
+          break;
         case 'success':
           spinner.succeed(chalk.green(update.message || 'Success!'));
           if (uiServer) {
@@ -123,12 +133,17 @@ program
     // Start the TDD-AI loop
     spinner.text = 'Initializing TDD-AI loop...';
 
+    // Create validation prompt handler
+    const validationPrompt = createValidationPrompt();
+
     let tddAi: { stop: () => Promise<void>; getState: () => TddAiState };
     try {
       tddAi = await startTddAiLoop({
         projectPath,
         testPattern: options.testPattern,
         maxAttempts,
+        skipValidation: options.skipValidation,
+        onValidationIssue: validationPrompt,
         onUpdate: handleStatusUpdate,
       });
     } catch (error) {
@@ -189,3 +204,59 @@ program
   });
 
 program.parse(process.argv);
+
+/**
+ * Creates an interactive prompt for the user to override validation warnings
+ */
+function createValidationPrompt(): (status: TestValidationStatus, testFilePath: string) => Promise<boolean> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  return (status: TestValidationStatus, testFilePath: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      console.log('\n');
+      console.log(chalk.yellow.bold('⚠️  Test Validation Warning ⚠️'));
+      console.log(chalk.yellow(`The AI found potential issues with test file: ${testFilePath}`));
+      console.log('\n');
+
+      console.log(chalk.white.bold('Overall Assessment:'));
+      console.log(chalk.white(status.overallAssessment));
+      console.log('\n');
+
+      console.log(chalk.white.bold('Issues Found:'));
+      status.issues.forEach((issue, index) => {
+        const color = issue.severity === 'error' ? chalk.red : chalk.yellow;
+        console.log(color(`${index + 1}. [${issue.severity.toUpperCase()}] ${issue.message}`));
+        if (issue.location) {
+          console.log(color(`   Location: ${issue.location}`));
+        }
+        if (issue.suggestion) {
+          console.log(color(`   Suggestion: ${issue.suggestion}`));
+        }
+      });
+
+      console.log('\n');
+      console.log(chalk.white('These issues might make it difficult for the AI to implement a solution.'));
+      console.log(chalk.white('You can either:'));
+      console.log(chalk.white('1. Stop and fix the issues in your test'));
+      console.log(chalk.white('2. Continue anyway (the AI will try its best)'));
+      console.log('\n');
+
+      rl.question(chalk.cyan('Do you want to continue anyway? (y/N): '), (answer) => {
+        const shouldContinue = answer.toLowerCase() === 'y';
+        if (shouldContinue) {
+          console.log(chalk.green('Continuing with implementation despite validation warnings...'));
+        } else {
+          console.log(chalk.blue('Stopping to allow test fixes. Run again after fixing the issues.'));
+        }
+
+        // Don't close the readline interface as it might be used again
+        // rl.close();
+
+        resolve(shouldContinue);
+      });
+    });
+  };
+}

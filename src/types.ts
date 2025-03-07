@@ -91,6 +91,8 @@ export interface OrchestratorOptions {
   maxAttempts?: number;
   onUpdate?: (update: StatusUpdate) => void;
   debugMode?: boolean;
+  skipValidation?: boolean;
+  onValidationIssue?: (issues: TestValidationStatus, testFilePath: string) => Promise<boolean>;
 }
 
 export interface TddAiState {
@@ -127,7 +129,9 @@ export type StatusUpdateType =
   | 'success'
   | 'error'
   | 'max_attempts_reached'
-  | 'diagnostic_info';
+  | 'diagnostic_info'
+  | 'validation_warning'
+  | 'validation_waiting';
 
 export interface StatusUpdate {
   status: StatusUpdateType;
@@ -137,6 +141,23 @@ export interface StatusUpdate {
   maxAttempts?: number;
   timestamp?: Date;
   diagnosticInfo?: Record<string, any>;
+  validationIssues?: TestValidationIssue[];
+  validationAssessment?: string;
+}
+
+// Test validation types
+export interface TestValidationIssue {
+  severity: 'warning' | 'error';
+  message: string;
+  location?: string;
+  suggestion?: string;
+}
+
+export interface TestValidationStatus {
+  isValid: boolean;
+  issues: TestValidationIssue[];
+  overallAssessment: string;
+  overridden: boolean;
 }
 
 // UI types
